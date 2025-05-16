@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useState, ReactNode, useRef, useEffect } from 'react';
 import { analyzeApp, getAnalysisStatus, getAnalysisResult } from '../api';
 import { AnalysisState, AnalysisResult, AnalysisProgress } from '../types';
 import { analysisTips } from '../utils/tips';
@@ -26,15 +26,82 @@ export const AnalysisProvider: React.FC<{ children: ReactNode }> = ({ children }
   const [jobId, setJobId] = useState<string | null>(null);
   const [currentTip, setCurrentTip] = useState<string>(analysisTips[0]);
   const [tipInterval, setTipInterval] = useState<NodeJS.Timeout | null>(null);
-  const [statusInterval, setStatusInterval] = useState<NodeJS.Timeout | null>(null);
+  const [status, setStatus] = useState<string>('idle');
+  
+  // Keeps the active setInterval ID so we can always clear it
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Cleanup intervals on unmount or when intervals change
-  React.useEffect(() => {
+  // Handle status updates
+  const updateFromStatus = async (data: any) => {
+    setProgress(data);
+    setError(null);
+    
+    // Check if analysis is complete
+    if (
+      data.progress >= 100 ||
+      ['done', 'completed'].includes((data.status ?? '').toLowerCase())
+    ) {
+      try {
+        console.log('Analysis complete, fetching results...'); // Debug log
+        const results = await getAnalysisResult(jobId!);
+        console.log('Got results:', results); // Debug log
+        
+        // Clear tip interval
+        if (tipInterval) clearInterval(tipInterval);
+        setTipInterval(null);
+        
+        // Set results and state
+        setResult(results);
+        setAnalysisState('done');
+        // setStatus('completed'); // removed redundant status update
+      } catch (error) {
+        console.error('Failed to fetch results:', error);
+        setError('Failed to fetch analysis results');
+        setAnalysisState('error');
+        setStatus('error');
+        
+        // Clear tip interval on error
+        if (tipInterval) clearInterval(tipInterval);
+        setTipInterval(null);
+      }
+    }
+  };
+
+  // Polling effect
+  useEffect(() => {
+    // If there's no job or the job is no longer "processing", stop polling
+    if (!jobId || status !== "processing") {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+      return;
+    }
+
+    // Clear any previous interval (fixes duplicate timers on HMR)
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+    }
+
+    // Start a fresh interval
+    pollingRef.current = setInterval(async () => {
+      try {
+        const statusData = await getAnalysisStatus(jobId);
+        setStatus(statusData.status ?? 'processing');
+        updateFromStatus(statusData);
+      } catch (err) {
+        console.error("Polling failed", err);
+      }
+    }, 2000); // poll every 2 seconds
+
+    // Clean up on unmount or when deps change
     return () => {
-      if (statusInterval) clearInterval(statusInterval);
-      if (tipInterval) clearInterval(tipInterval);
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
     };
-  }, [statusInterval, tipInterval]);
+  }, [jobId, status]); // keep deps minimal
 
   // Reset analysis state
   const resetAnalysis = () => {
@@ -43,23 +110,19 @@ export const AnalysisProvider: React.FC<{ children: ReactNode }> = ({ children }
     setResult(null);
     setError(null);
     setJobId(null);
+    setStatus('idle');
     if (tipInterval) clearInterval(tipInterval);
-    if (statusInterval) clearInterval(statusInterval);
+    if (pollingRef.current) clearInterval(pollingRef.current);
     setTipInterval(null);
-    setStatusInterval(null);
+    pollingRef.current = null;
   };
 
   // Start analysis process
   const startAnalysis = async () => {
     try {
-      // Clear any existing intervals first
-      if (statusInterval) clearInterval(statusInterval);
-      if (tipInterval) clearInterval(tipInterval);
-      setStatusInterval(null);
-      setTipInterval(null);
-      
       resetAnalysis();
       setAnalysisState('loading');
+      setStatus('processing');
       
       // Rotate through tips during analysis
       const newTipInterval = setInterval(() => {
@@ -77,69 +140,11 @@ export const AnalysisProvider: React.FC<{ children: ReactNode }> = ({ children }
       setJobId(newJobId);
       setError(null);
       
-      // Poll for updates
-      const newStatusInterval = setInterval(async () => {
-        if (!newJobId) {
-          clearInterval(newStatusInterval);
-          return;
-        }
-        
-        try {
-          const status = await getAnalysisStatus(newJobId);
-          console.log('Status update:', status); // Debug log
-          
-          setProgress(status);
-          setError(null);
-          
-          // Check if analysis is complete
-          if (status.progress >= 100 || status.status === 'completed') {
-            try {
-              console.log('Analysis complete, fetching results...'); // Debug log
-              const results = await getAnalysisResult(newJobId);
-              console.log('Got results:', results); // Debug log
-              
-              // Clear intervals first
-              clearInterval(newStatusInterval);
-              clearInterval(newTipInterval);
-              setTipInterval(null);
-              setStatusInterval(null);
-              
-              // Then set results and state
-              setResult(results);
-              setAnalysisState('done');
-              return; // Exit after setting results
-            } catch (error) {
-              console.error('Failed to fetch results:', error);
-              setError('Failed to fetch analysis results');
-              setAnalysisState('error');
-              
-              // Clear intervals on error
-              clearInterval(newStatusInterval);
-              clearInterval(newTipInterval);
-              setTipInterval(null);
-              setStatusInterval(null);
-            }
-          }
-        } catch (error) {
-          console.error('Status check error:', error);
-          // Don't set error state immediately for transient failures
-          if (error instanceof Error && error.message !== 'Failed to get analysis status') {
-            clearInterval(newStatusInterval);
-            clearInterval(newTipInterval);
-            setTipInterval(null);
-            setStatusInterval(null);
-            setError(error instanceof Error ? error.message : 'Failed to check analysis status');
-            setAnalysisState('error');
-          }
-        }
-      }, 2000);
-      
-      setStatusInterval(newStatusInterval);
-      
     } catch (error) {
       console.error('Analysis process error:', error);
       setError('Failed to start analysis process');
       setAnalysisState('error');
+      setStatus('error');
       if (tipInterval) clearInterval(tipInterval);
       setTipInterval(null);
     }

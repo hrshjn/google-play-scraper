@@ -15,7 +15,7 @@ import traceback
 
 # Configure logging with more detail
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ app = FastAPI()
 # Enable CORS with more permissive settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # More permissive for debugging
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -180,14 +180,14 @@ async def run_analysis(job_id: str, app_id: str):
         reviews = []
         continuation_token = None
         review_count = 0
-        max_reviews = 50  # Changed from 500 to 50 for prototyping
+        max_reviews = 250
         
         while review_count < max_reviews:
             try:
                 logger.debug(f"Fetching reviews batch (current count: {review_count})")
                 result, continuation_token = gplay_reviews(
                     app_id,
-                    count=50,  # Also reduced batch size to match max_reviews
+                    count=250,
                     continuation_token=continuation_token
                 )
                 
@@ -195,19 +195,26 @@ async def run_analysis(job_id: str, app_id: str):
                     logger.warning("Received empty result from review fetch")
                     break
                     
-                reviews.extend(result)
-                review_count += len(result)
-                logger.info(f"Fetched {len(result)} reviews. Total: {review_count}")
+                # Process reviews in smaller chunks to avoid memory issues
+                chunk_size = 50
+                for i in range(0, len(result), chunk_size):
+                    chunk = result[i:i + chunk_size]
+                    reviews.extend(chunk)
+                    review_count = len(reviews)
+                    
+                    # Update progress
+                    progress = min(80, int(10 + (review_count / max_reviews * 70)))
+                    analyses[job_id].update({
+                        'progress': progress,
+                        'stage': f'Fetched {review_count} reviews'
+                    })
+                    
+                    # Break if we've reached max_reviews
+                    if review_count >= max_reviews:
+                        break
                 
-                # Update progress
-                progress = min(80, int(10 + (review_count / max_reviews * 70)))
-                analyses[job_id].update({
-                    'progress': progress,
-                    'stage': f'Fetched {review_count} reviews'
-                })
-                
-                if not continuation_token:
-                    logger.info("No more reviews available")
+                if not continuation_token or review_count >= max_reviews:
+                    logger.info("Completed fetching reviews")
                     break
                     
             except Exception as e:
@@ -241,19 +248,42 @@ async def run_analysis(job_id: str, app_id: str):
             'rating': app_info['score']
         }
         
-        logger.info(f"Starting review analysis for {review_count} reviews")
-        # Run analysis
-        result = analyze_app_reviews(reviews, app_metadata)
+        # Process reviews in chunks to avoid memory issues
+        result = None
+        chunk_size = 50
+        for i in range(0, len(reviews), chunk_size):
+            chunk = reviews[i:i + chunk_size]
+            chunk_result = analyze_app_reviews(chunk, app_metadata)
+            
+            if result is None:
+                result = chunk_result
+            else:
+                # Merge results
+                for category in ['complaints', 'praise', 'feature_requests']:
+                    result[category].extend(chunk_result[category])
+                result['kpi']['total'] += chunk_result['kpi']['total']
+                result['kpi']['complaints'] += chunk_result['kpi']['complaints']
+                result['kpi']['praise'] += chunk_result['kpi']['praise']
+                result['kpi']['features'] += chunk_result['kpi']['features']
+        
         logger.info("Review analysis completed successfully")
         
         # Store result
-        analyses[job_id].update({
-            'status': 'completed',
-            'progress': 100,
-            'stage': 'Analysis complete',
-            'result': result
-        })
-        
+        try:
+            analyses[job_id].update({
+                'status': 'completed',
+                'progress': 100,
+                'stage': 'Analysis complete',
+                'result': result
+            })
+        except Exception as e:
+            error_msg = f"Failed to store analysis result: {str(e)}"
+            logger.error(error_msg)
+            analyses[job_id].update({
+                'status': 'error',
+                'stage': error_msg
+            })
+            
     except Exception as e:
         error_details = f"Analysis failed: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_details)

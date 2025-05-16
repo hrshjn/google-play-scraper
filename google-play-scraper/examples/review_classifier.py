@@ -8,13 +8,14 @@ import logging
 from pathlib import Path
 import time
 from dotenv import load_dotenv
+from cost_tracker import CostTracker, cost_logger
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging for review classifier
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def load_api_key() -> str:
     """Load OpenAI API key from environment variable or .env file."""
@@ -46,6 +47,9 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize OpenAI client: {str(e)}")
     client = None
+
+# Initialize cost tracker
+cost_tracker = CostTracker()
 
 # SYSTEM_PROMPT updated to include subcategory classification and rationale extraction
 SYSTEM_PROMPT = """You are an expert at analyzing app reviews. Your task is to classify each review into one of these categories:
@@ -139,6 +143,15 @@ Return your analysis as a JSON object with this structure:
                 temperature=0.1
             )
             
+            # Track API usage (logged privately)
+            app_id = review.get('appId', 'unknown')
+            cost_tracker.log_api_call(
+                app_id=app_id,
+                review_count=1,
+                completion_tokens=response.usage.completion_tokens,
+                prompt_tokens=response.usage.prompt_tokens
+            )
+            
             result = json.loads(response.choices[0].message.content)
             logger.info(f"Successfully classified review: {result['category']} - {result['subcategory']}")
             return result
@@ -228,18 +241,35 @@ def analyze_app_reviews(reviews: List[Dict[str, Any]], app_info: Optional[Dict[s
     """Analyze app reviews and generate a comprehensive report."""
     logger.info(f"Starting analysis of {len(reviews)} reviews")
     
-    # Classify reviews
-    classified_reviews = classify_reviews_batch(reviews)
-    
-    # Generate summary
-    summary = summarize_classified_reviews(classified_reviews)
-    
-    # Add app info if provided
-    if app_info:
-        summary['app'] = app_info
-    
-    logger.info("Analysis completed successfully")
-    return summary
+    try:
+        # Classify reviews
+        classified_reviews = classify_reviews_batch(reviews)
+        
+        # Generate summary
+        summary = summarize_classified_reviews(classified_reviews)
+        
+        # Add app info if provided
+        if app_info:
+            summary['app'] = app_info
+        
+        logger.info("Analysis completed successfully")
+        return summary
+        
+    except Exception as e:
+        logger.error(f"Analysis failed: {str(e)}")
+        # Return a partial result if possible
+        return {
+            'app': app_info or {},
+            'kpi': {
+                'total': len(reviews),
+                'complaints': 0,
+                'praise': 0,
+                'features': 0
+            },
+            'complaints': [],
+            'praise': [],
+            'feature_requests': []
+        }
 
 # Example usage
 if __name__ == "__main__":
