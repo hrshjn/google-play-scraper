@@ -88,36 +88,36 @@ export const AnalysisProvider: React.FC<{ children: ReactNode }> = ({ children }
           const status = await getAnalysisStatus(newJobId);
           console.log('Status update:', status); // Debug log
           
-          // Check if the status indicates an error
-          if (status.status === 'error') {
-            clearInterval(newStatusInterval);
-            clearInterval(newTipInterval);
-            setTipInterval(null);
-            setStatusInterval(null);
-            setError(status.stage || 'Analysis failed');
-            setAnalysisState('error');
-            return;
-          }
-          
           setProgress(status);
           setError(null);
           
           // Check if analysis is complete
           if (status.progress >= 100 || status.status === 'completed') {
-            clearInterval(newStatusInterval);
-            clearInterval(newTipInterval);
-            setTipInterval(null);
-            setStatusInterval(null);
-            
             try {
+              console.log('Analysis complete, fetching results...'); // Debug log
               const results = await getAnalysisResult(newJobId);
-              console.log('Analysis results:', results); // Debug log
+              console.log('Got results:', results); // Debug log
+              
+              // Clear intervals first
+              clearInterval(newStatusInterval);
+              clearInterval(newTipInterval);
+              setTipInterval(null);
+              setStatusInterval(null);
+              
+              // Then set results and state
               setResult(results);
               setAnalysisState('done');
+              return; // Exit after setting results
             } catch (error) {
               console.error('Failed to fetch results:', error);
               setError('Failed to fetch analysis results');
               setAnalysisState('error');
+              
+              // Clear intervals on error
+              clearInterval(newStatusInterval);
+              clearInterval(newTipInterval);
+              setTipInterval(null);
+              setStatusInterval(null);
             }
           }
         } catch (error) {
@@ -128,7 +128,7 @@ export const AnalysisProvider: React.FC<{ children: ReactNode }> = ({ children }
             clearInterval(newTipInterval);
             setTipInterval(null);
             setStatusInterval(null);
-            setError(error.message);
+            setError(error instanceof Error ? error.message : 'Failed to check analysis status');
             setAnalysisState('error');
           }
         }
