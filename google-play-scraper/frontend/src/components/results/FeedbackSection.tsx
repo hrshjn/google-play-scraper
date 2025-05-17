@@ -1,9 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { MessageCircle } from 'lucide-react';
 import { AccordionItem } from '../ui/Accordion';
 import { FeedbackCategory } from '../../types';
 import CategoryChip from './CategoryChip';
-import FeedbackItem from './FeedbackItem';
+import ReviewList from './ReviewList';
+import { useReviewsCache } from '../../hooks/useReviewsCache';
+
+const PAGE_SIZE = 5; // number of reviews to show per "page"
 
 interface FeedbackSectionProps {
   title: string;
@@ -20,9 +23,60 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({
 }) => {
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   
-  const filteredCategories = activeCategory
-    ? categories.filter(cat => cat.subcategory === activeCategory)
-    : categories;
+  // Normalize and combine categories
+  const normalizedCategories = useMemo(() => {
+    const categoryMap = new Map<string, FeedbackCategory>();
+    
+    categories.forEach(category => {
+      const normalizedName = category.subcategory.trim().toLowerCase();
+      const existing = categoryMap.get(normalizedName);
+      
+      if (existing) {
+        // Combine items and update count
+        categoryMap.set(normalizedName, {
+          subcategory: category.subcategory.trim(), // Keep original casing of first occurrence
+          items: [...existing.items, ...category.items],
+          count: existing.count + category.count
+        });
+      } else {
+        categoryMap.set(normalizedName, {
+          ...category,
+          subcategory: category.subcategory.trim()
+        });
+      }
+    });
+    
+    return Array.from(categoryMap.values());
+  }, [categories]);
+  
+  // Get total count for current view
+  const totalCount = useMemo(() => {
+    if (activeCategory) {
+      return normalizedCategories.find(
+        c => c.subcategory.toLowerCase() === activeCategory.toLowerCase()
+      )?.count || 0;
+    }
+    return normalizedCategories.reduce((sum, cat) => sum + cat.count, 0);
+  }, [normalizedCategories, activeCategory]);
+  
+  const {
+    items,
+    isLoading,
+    error,
+    page,
+    hasMore,
+    sortOrder,
+    loadMore,
+    setSortOrder
+  } = useReviewsCache({
+    initialItems: activeCategory 
+      ? normalizedCategories.find(c => c.subcategory.toLowerCase() === activeCategory.toLowerCase())?.items || []
+      : normalizedCategories[0]?.items || [],
+    pageSize: PAGE_SIZE,
+    category: activeCategory || undefined,
+    type,
+    totalCount
+  });
   
   // Header styles based on feedback type
   const headerStyles = {
@@ -52,32 +106,39 @@ const FeedbackSection: React.FC<FeedbackSectionProps> = ({
     >
       <div className="space-y-4">
         <div className="flex flex-wrap gap-2">
-          {categories.map((category) => (
+          {normalizedCategories.map((category) => (
             <CategoryChip
-              key={category.subcategory}
+              key={category.subcategory.toLowerCase()}
               label={category.subcategory}
               count={category.count}
               type={type}
-              active={activeCategory === category.subcategory}
+              active={activeCategory?.toLowerCase() === category.subcategory.toLowerCase()}
               onClick={() => setActiveCategory(
-                activeCategory === category.subcategory ? null : category.subcategory
+                activeCategory?.toLowerCase() === category.subcategory.toLowerCase() ? null : category.subcategory
               )}
+              loading={isLoading}
             />
           ))}
         </div>
+
+        {error && (
+          <div className="text-red-500 text-center py-4">
+            {error.message}
+          </div>
+        )}
         
-        <div className="divide-y divide-gray-100">
-          {filteredCategories.map((category) => (
-            <React.Fragment key={category.subcategory}>
-              {category.items.map((item, index) => (
-                <FeedbackItem
-                  key={`${category.subcategory}-${index}`}
-                  item={item}
-                  type={type}
-                />
-              ))}
-            </React.Fragment>
-          ))}
+        <div className="max-h-[600px] overflow-y-auto">
+          <ReviewList
+            items={items}
+            type={type}
+            page={page}
+            pageSize={PAGE_SIZE}
+            totalItems={totalCount}
+            isLoading={isLoading}
+            sortOrder={sortOrder}
+            onLoadMore={hasMore ? loadMore : undefined}
+            onSortChange={setSortOrder}
+          />
         </div>
       </div>
     </AccordionItem>

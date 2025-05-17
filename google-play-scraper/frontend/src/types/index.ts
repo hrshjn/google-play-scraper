@@ -17,19 +17,36 @@ export type FeedbackItem = {
   confidence?: number;
 };
 
-export type SubCategory = 
-  | 'Performance'
-  | 'Bugs'
-  | 'Pricing'
-  | 'UX'
-  | 'Integration Issues'
-  | 'Support';
+/**
+ * Generic paginated server response.
+ */
+export interface PaginatedResponse<T> {
+  items: T[];
+  /** Page index starting at 1 */
+  page: number;
+  /** Max results per page */
+  limit: number;
+  /** Total number of items available on the server */
+  total: number;
+}
+
+/**
+ * Allowed sort orders when requesting paginated reviews
+ * (expand as new server‑side options become available).
+ */
+export type SortOrder =
+  | 'relevance'
+  | 'newest'
+  | 'oldest'
+  | 'highest_rating'
+  | 'lowest_rating';
+
+export type SubCategory = string;
 
 export type FeedbackCategory = {
   subcategory: SubCategory;
-  count: number;
   items: FeedbackItem[];
-  confidence?: number;
+  count: number;
 };
 
 export type AnalysisResult = {
