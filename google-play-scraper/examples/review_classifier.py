@@ -83,6 +83,7 @@ You must respond with ONLY a JSON object in this exact format:
 The confidence score (0.0-1.0) indicates how confident you are in the classification.
 Do not include any other text in your response, only the JSON object."""
 
+
 SUBCATEGORIES = {
     'complaints': [
         'Performance',
@@ -107,6 +108,43 @@ SUBCATEGORIES = {
         'Support'
     ]
 }
+
+def normalize_subcategory(subcategory: str) -> str:
+    """
+    Normalize subcategory names so that logically equivalent variants are grouped
+    under a single canonical label (e.g. "performance" -> "Performance").
+    """
+    if not subcategory:
+        return "N/A"
+
+    sub = subcategory.strip().lower()
+
+    mapping = {
+        "bugs": "Bugs",
+        "bug": "Bugs",
+        "performance": "Performance",
+        "perf": "Performance",
+        "pricing": "Pricing",
+        "price": "Pricing",
+        "ux": "UX",
+        "user experience": "UX",
+        "integration": "Integration Issues",
+        "integration issues": "Integration Issues",
+        "support": "Support",
+        "customer support": "Support",
+        "onboarding": "Onboarding",
+        "data/sync": "Data/Sync",
+        "cross-platform": "Cross-Platform"
+    }
+
+    if sub in mapping:
+        return mapping[sub]
+
+    # Default: title‑case words, keeping acronyms uppercase
+    return " ".join(
+        w.upper() if w.lower() in {"ux", "ui"} else w.capitalize()
+        for w in subcategory.strip().split()
+    )
 
 def classify_review(review: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
     """Classify a single review using GPT-4."""
@@ -153,6 +191,8 @@ Return your analysis as a JSON object with this structure:
             )
             
             result = json.loads(response.choices[0].message.content)
+            # Normalise the subcategory to a canonical label
+            result["subcategory"] = normalize_subcategory(result.get("subcategory", ""))
             logger.info(f"Successfully classified review: {result['category']} - {result['subcategory']}")
             return result
             
@@ -186,7 +226,7 @@ def classify_reviews_batch(reviews: List[Dict[str, Any]], max_workers: int = 3) 
     return classified_reviews
 
 def summarize_classified_reviews(classified_reviews: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-    """Generate a summary of classified reviews."""
+    """Generate a summary of classified reviews (keeps the full item list, adds total_items for pagination)."""
     summary = {
         'app': {
             'name': '',  # To be filled by the caller
@@ -206,7 +246,7 @@ def summarize_classified_reviews(classified_reviews: Dict[str, List[Dict[str, An
         # Group by subcategory
         subcategories = {}
         for review in reviews:
-            subcategory = review['subcategory']
+            subcategory = normalize_subcategory(review['subcategory'])
             if subcategory not in subcategories:
                 subcategories[subcategory] = {
                     'items': [],
@@ -227,7 +267,8 @@ def summarize_classified_reviews(classified_reviews: Dict[str, List[Dict[str, An
                 'subcategory': subcategory,
                 'count': data['count'],
                 'confidence': data['confidence_sum'] / data['count'],
-                'items': sorted(data['items'], key=lambda x: x['confidence'], reverse=True)[:3]
+                'items': sorted(data['items'], key=lambda x: x['confidence'], reverse=True),
+                'total_items': data['count'],
             }
             for subcategory, data in subcategories.items()
         ]

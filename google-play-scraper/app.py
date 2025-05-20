@@ -35,6 +35,10 @@ app.add_middleware(
 # Store ongoing analyses
 analyses: Dict[str, Dict] = {}
 
+# Helper key names we’ll use later to store every individual review,
+# grouped by *subcategory* (the tag shown in the UI, e.g. “Performance”)
+REVIEWS_KEY = "reviews_by_subcategory"
+
 class AnalysisRequest(BaseModel):
     appUrl: str
 
@@ -55,7 +59,8 @@ async def start_analysis(request: AnalysisRequest):
             'progress': 0,
             'stage': 'Fetching app info',
             'app_id': app_id,
-            'url': request.appUrl
+            'url': request.appUrl,
+            REVIEWS_KEY: {}  # will be filled once analysis completes
         }
         
         # Start analysis in background
@@ -120,6 +125,66 @@ async def get_status(job_id: str):
             },
             status_code=500
         )
+
+@app.get("/api/reviews/{job_id}/category/{category}")
+async def get_reviews_by_category(
+    job_id: str,
+    category: str,
+    page: int = 1,
+    limit: int = 10,
+    sort: str = "confidence"  # any numeric field inside each review dict
+):
+    """
+    Paginated review fetcher.
+    - `category` is the *subcategory/tag* (e.g. "Performance").
+    - `page` is 1‑based.
+    - `limit` is items per page.
+    - `sort` (optional) sorts descending by that key if present.
+    """
+    if job_id not in analyses:
+        return JSONResponse(
+            content={'error': 'Analysis job not found'},
+            status_code=404
+        )
+
+    data = analyses[job_id]
+    if data.get('status') != 'completed':
+        return JSONResponse(
+            content={'error': 'Results not ready'},
+            status_code=409
+        )
+
+    reviews_map = data.get(REVIEWS_KEY, {})
+    reviews = reviews_map.get(category)
+    if reviews is None:
+        return JSONResponse(
+            content={'error': f'Category "{category}" not found'},
+            status_code=404
+        )
+
+    # Optional sorting
+    if sort and all(isinstance(r.get(sort), (int, float)) for r in reviews if r.get(sort) is not None):
+        reviews = sorted(reviews, key=lambda r: r.get(sort, 0), reverse=True)
+
+    total = len(reviews)
+    pages = max((total + limit - 1) // limit, 1)
+    # Clamp page number
+    page = max(1, min(page, pages))
+    start = (page - 1) * limit
+    end = start + limit
+    paginated = reviews[start:end]
+
+    return JSONResponse(
+        content={
+            'category': category,
+            'page': page,
+            'limit': limit,
+            'pages': pages,
+            'total': total,
+            'reviews': paginated
+        },
+        status_code=200
+    )
 
 @app.get("/api/results/{job_id}")
 async def get_results(job_id: str):
@@ -248,25 +313,38 @@ async def run_analysis(job_id: str, app_id: str):
             'rating': app_info['score']
         }
         
+        # Dict that will collect *all* individual reviews keyed by sub‑category
+        full_review_map: Dict[str, list] = {}
+        
         # Process reviews in chunks to avoid memory issues
         result = None
         chunk_size = 50
         for i in range(0, len(reviews), chunk_size):
             chunk = reviews[i:i + chunk_size]
             chunk_result = analyze_app_reviews(chunk, app_metadata)
-            
+
             if result is None:
+                # First chunk – deep copy so we can extend later
                 result = chunk_result
             else:
-                # Merge results
-                for category in ['complaints', 'praise', 'feature_requests']:
-                    result[category].extend(chunk_result[category])
-                result['kpi']['total'] += chunk_result['kpi']['total']
-                result['kpi']['complaints'] += chunk_result['kpi']['complaints']
-                result['kpi']['praise'] += chunk_result['kpi']['praise']
-                result['kpi']['features'] += chunk_result['kpi']['features']
+                # Merge top‑level KPI counters
+                for k in ['total', 'complaints', 'praise', 'features']:
+                    result['kpi'][k] += chunk_result['kpi'][k]
+
+                # Extend lists without truncating
+                for top_cat in ['complaints', 'praise', 'feature_requests']:
+                    result[top_cat].extend(chunk_result[top_cat])
+
+            # --- NEW: capture every individual review by sub‑category ---
+            for top_cat in ['complaints', 'praise', 'feature_requests']:
+                for item in chunk_result[top_cat]:
+                    sub_cat = item.get('subcategory') or 'N/A'
+                    full_review_map.setdefault(sub_cat, []).append(item)
         
         logger.info("Review analysis completed successfully")
+        
+        # Persist the fully‑expanded review map for pagination
+        analyses[job_id][REVIEWS_KEY] = full_review_map
         
         # Store result
         try:
@@ -274,7 +352,8 @@ async def run_analysis(job_id: str, app_id: str):
                 'status': 'completed',
                 'progress': 100,
                 'stage': 'Analysis complete',
-                'result': result
+                'result': result,
+                REVIEWS_KEY: full_review_map
             })
         except Exception as e:
             error_msg = f"Failed to store analysis result: {str(e)}"
